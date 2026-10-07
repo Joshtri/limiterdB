@@ -9,5 +9,12 @@
   "author": {
     "name": "Joshtri",
     "email": "stuffofyos1516@gmail.com"
+  },
+  "info": {
+    "companyName": "Joshtri",
+    "productName": "limiterdB",
+    "productVersion": "0.0.0",
+    "copyright": "Copyright (c) Joshtri",
+    "comments": "A decibel limit for your ears"
   }
 }

@@ -1,0 +1,83 @@
+# Build limiterdB untuk Windows dan publish ke GitHub Releases.
+# Rilis: push tag versi, misal `git tag v1.0.0 && git push origin v1.0.0`.
+# Run manual (workflow_dispatch) hanya build + upload artifact, tanpa rilis.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  NODE_OPTIONS: "--max-old-space-size=4096"
+  WAILS_VERSION: v2.16.0
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install Wails CLI
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@${{ env.WAILS_VERSION }}
+
+      - name: Install NSIS
+        run: |
+          choco install nsis -y --no-progress
+          "C:\Program Files (x86)\NSIS" | Out-File -FilePath $env:GITHUB_PATH -Append
+
+      # Tag v1.2.3 / v1.2.3-beta.1 -> productVersion 1.2.3 (NSIS butuh angka X.Y.Z)
+      - name: Set version
+        id: version
+        run: |
+          $tag = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME } else { 'v0.0.0-dev' }
+          $version = ($tag.TrimStart('v') -split '-')[0]
+          $config = Get-Content wails.json -Raw | ConvertFrom-Json
+          $config.info.productVersion = $version
+          $config | ConvertTo-Json -Depth 10 | Set-Content wails.json
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "prerelease=$($tag.Contains('-').ToString().ToLower())" >> $env:GITHUB_OUTPUT
+
+      - name: Build
+        run: wails build -platform windows/amd64 -nsis -clean -trimpath
+
+      # Nama file tetap (tanpa versi) supaya link
+      # /releases/latest/download/<nama> selalu mengarah ke versi terbaru.
+      - name: Package
+        run: |
+          New-Item -ItemType Directory -Force release | Out-Null
+          Copy-Item build/bin/limiterdB-amd64-installer.exe release/limiterdB-windows-amd64-setup.exe
+          Copy-Item build/bin/limiterdB.exe release/limiterdB-windows-amd64-portable.exe
+          Get-ChildItem release/*.exe | ForEach-Object {
+            "$((Get-FileHash $_ -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
+          } | Set-Content release/SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: limiterdB-${{ steps.version.outputs.tag }}-windows-amd64
+          path: release/*
+
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          prerelease: ${{ steps.version.outputs.prerelease }}
+          generate_release_notes: true
