@@ -25,7 +25,10 @@ const (
 
 // Status adalah snapshot read-only buat ditampilkan ke UI.
 type Status struct {
-	Enabled       bool          `json:"enabled"`
+	Enabled bool `json:"enabled"` // switch limiter di UI
+	// Active: limiter benar-benar mengatur volume (switch nyala dan device
+	// adalah headphone/headset). Untuk speaker limiter dijeda.
+	Active        bool          `json:"active"`
 	CurrentVolume float64       `json:"currentVolume"`
 	LastLevel     float64       `json:"lastLevel"`
 	Threshold     float64       `json:"threshold"`
@@ -37,6 +40,8 @@ type Status struct {
 	Listening     bool          `json:"listening"` // ada audio terdengar (tidak senyap/mute)
 	DeviceOK      bool          `json:"deviceOk"`
 	Device        domain.Device `json:"device"`
+	BoostDB       float64       `json:"boostDb"`    // boost speaker yang terpasang
+	BoostError    string        `json:"boostError"` // kosong kalau boost berhasil diterapkan
 }
 
 // LimiterService menjalankan loop yang selalu aktif selama aplikasi hidup:
@@ -62,6 +67,12 @@ type LimiterService struct {
 	lastLevel domain.Level
 	lastVol   domain.Volume
 	exposure  domain.ExposureLog
+
+	// Boost speaker (opsional, nil kalau Equalizer APO tidak ada).
+	booster     domain.Booster
+	boostDB     float64 // boost yang sedang terpasang (dB)
+	boostSynced bool    // boostDB sudah tertulis ke booster
+	boostErr    string
 }
 
 func NewLimiterService(
@@ -115,6 +126,7 @@ func (s *LimiterService) Stop() {
 	s.mu.Lock()
 	cancel := s.cancel
 	done := s.loopDone
+	booster := s.booster
 	s.cancel = nil
 	s.mu.Unlock()
 
@@ -124,6 +136,10 @@ func (s *LimiterService) Stop() {
 	cancel()
 	<-done
 	s.saveExposure()
+	// Boost hanya berlaku selama limiterdB jalan.
+	if booster != nil {
+		_ = booster.SetBoost(0)
+	}
 }
 
 func (s *LimiterService) loop(ctx context.Context, done chan struct{}) {
@@ -138,6 +154,7 @@ func (s *LimiterService) loop(ctx context.Context, done chan struct{}) {
 	defer ticker.Stop()
 
 	s.refreshDevice()
+	s.syncBoost()
 	last := s.now()
 	lastSave := last
 	n := 0
@@ -158,6 +175,7 @@ func (s *LimiterService) loop(ctx context.Context, done chan struct{}) {
 			n++
 			if n%deviceRefreshTicks == 0 {
 				s.refreshDevice()
+				s.syncBoost()
 			}
 			s.tick(ctx, now, dt)
 
@@ -195,13 +213,13 @@ func (s *LimiterService) tick(ctx context.Context, now time.Time, dt time.Durati
 	th := domain.ThresholdFor(st.TargetSPL, maxSPL)
 
 	next := cur
-	if st.LimiterEnabled {
+	if st.LimiterEnabled && s.deviceOK && s.device.IsHeadphones() {
 		next = s.limiter.NextVolume(cur, lvl, th, domain.NewVolume(st.Ceiling))
 	}
 
 	// Yang terdengar selama tick ini memakai volume yang sedang berlaku (cur).
 	if s.deviceOK && !s.device.Muted && lvl > domain.SilenceLevel {
-		s.exposure.Add(now, dt, domain.EstimateSPL(maxSPL, lvl, cur))
+		s.exposure.Add(now, dt, domain.EstimateSPL(maxSPL, lvl, cur)+s.boostDB)
 	}
 
 	s.lastLevel = lvl
@@ -294,6 +312,7 @@ func (s *LimiterService) Status() Status {
 	listening := s.deviceOK && !s.device.Muted && s.lastLevel > domain.SilenceLevel
 	return Status{
 		Enabled:       s.settings.LimiterEnabled,
+		Active:        s.settings.LimiterEnabled && s.deviceOK && s.device.IsHeadphones(),
 		CurrentVolume: float64(s.lastVol),
 		LastLevel:     float64(s.lastLevel),
 		Threshold:     float64(domain.ThresholdFor(s.settings.TargetSPL, maxSPL)),
@@ -301,9 +320,50 @@ func (s *LimiterService) Status() Status {
 		TargetSPL:     s.settings.TargetSPL,
 		MaxSPL:        maxSPL,
 		Calibrated:    calibrated,
-		HeardSPL:      domain.EstimateSPL(maxSPL, s.lastLevel, s.lastVol),
+		HeardSPL:      domain.EstimateSPL(maxSPL, s.lastLevel, s.lastVol) + s.boostDB,
 		Listening:     listening,
 		DeviceOK:      s.deviceOK,
 		Device:        s.device,
+		BoostDB:       s.boostDB,
+		BoostError:    s.boostErr,
 	}
+}
+
+// UseBooster memasang booster untuk boost speaker. Panggil sebelum Start.
+func (s *LimiterService) UseBooster(b domain.Booster) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.booster = b
+}
+
+// SetSpeakerBoost mengubah boost speaker (persen, 100..200).
+func (s *LimiterService) SetSpeakerBoost(pct float64) domain.Settings {
+	return s.update(func(st *domain.Settings) { st.SpeakerBoost = pct })
+}
+
+// syncBoost menulis boost yang sesuai untuk device aktif: sesuai pengaturan
+// untuk speaker, selalu 0 untuk headphone/headset. Hanya menulis kalau ada
+// perubahan; kalau gagal dicoba lagi di refresh berikutnya.
+func (s *LimiterService) syncBoost() {
+	s.mu.RLock()
+	b := s.booster
+	want := 0.0
+	if s.deviceOK && !s.device.IsHeadphones() {
+		want = domain.BoostDB(s.settings.SpeakerBoost)
+	}
+	same := s.boostSynced && want == s.boostDB
+	s.mu.RUnlock()
+	if b == nil || same {
+		return
+	}
+
+	err := b.SetBoost(want)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err != nil {
+		s.boostDB, s.boostSynced, s.boostErr = 0, false, err.Error()
+		return
+	}
+	s.boostDB, s.boostSynced, s.boostErr = want, true, ""
 }

@@ -177,3 +177,69 @@ func TestStopSavesExposure(t *testing.T) {
 		t.Fatal("Stop harus menyimpan catatan paparan")
 	}
 }
+
+func TestLimiterPausedOnSpeakers(t *testing.T) {
+	m := &fakeMeter{lvl: -6} // lagu keras
+	v := &fakeVolume{v: 1.0}
+	l, _ := domain.NewLimiter(1.0, 0.02, domain.NewVolume(0.01))
+	speakers := domain.Device{ID: "spk", Name: "Test Speaker", Kind: "speakers"}
+	s := NewLimiterService(l, m, v, &fakeDevices{d: speakers}, nil, settings(true, 70), domain.NewExposureLog(), 5*time.Millisecond)
+	s.refreshDevice()
+
+	s.tick(context.Background(), time.Now(), 50*time.Millisecond)
+
+	if v.sets != 0 {
+		t.Fatalf("limiter tidak boleh mengubah volume speaker, got %d Set", v.sets)
+	}
+	if st := s.Status(); !st.Enabled || st.Active {
+		t.Fatalf("speaker: want enabled && !active, got %+v", st)
+	}
+}
+
+type fakeBooster struct {
+	mu    sync.Mutex
+	calls []float64
+}
+
+func (f *fakeBooster) SetBoost(db float64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, db)
+	return nil
+}
+
+func TestSpeakerBoostOnlyOnSpeakers(t *testing.T) {
+	devs := &fakeDevices{d: domain.Device{ID: "spk", Kind: "speakers"}}
+	l, _ := domain.NewLimiter(1.0, 0.02, domain.NewVolume(0.01))
+	st := settings(true, 70)
+	st.SpeakerBoost = 200
+	s := NewLimiterService(l, &fakeMeter{lvl: -20}, &fakeVolume{v: 1}, devs, nil, st, domain.NewExposureLog(), 5*time.Millisecond)
+	b := &fakeBooster{}
+	s.UseBooster(b)
+
+	s.refreshDevice()
+	s.syncBoost()
+	s.syncBoost() // tidak berubah → tidak ditulis ulang
+	if len(b.calls) != 1 || math.Abs(b.calls[0]-6.02) > 0.01 {
+		t.Fatalf("speaker 200%%: calls %v, want [≈6.02]", b.calls)
+	}
+	if got := s.Status().BoostDB; math.Abs(got-6.02) > 0.01 {
+		t.Fatalf("status boost %v", got)
+	}
+
+	devs.d = headphones // colok headphone → boost harus 0
+	s.refreshDevice()
+	s.syncBoost()
+	if last := b.calls[len(b.calls)-1]; last != 0 {
+		t.Fatalf("headphone: boost %v, want 0", last)
+	}
+}
+
+func TestBoostDB(t *testing.T) {
+	if domain.BoostDB(100) != 0 || math.Abs(domain.BoostDB(200)-6.02) > 0.01 {
+		t.Fatalf("BoostDB salah: %v %v", domain.BoostDB(100), domain.BoostDB(200))
+	}
+	if (domain.Settings{}).Normalize().SpeakerBoost != 100 {
+		t.Fatal("settings lama (tanpa speakerBoost) harus jadi 100%")
+	}
+}

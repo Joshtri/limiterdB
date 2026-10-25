@@ -8,13 +8,27 @@ const (
 	MinMaxSPL    = 60.0
 	MaxMaxSPL    = 130.0
 	MinCeiling   = 0.01
+	// Boost speaker dalam persen amplitudo: 100% = tanpa boost, 200% = +6 dB.
+	MinSpeakerBoost = 100.0
+	MaxSpeakerBoost = 200.0
 )
+
+// BoostDB mengubah persen boost ke gain dB (200% ≈ +6 dB).
+func BoostDB(pct float64) float64 {
+	if pct <= MinSpeakerBoost {
+		return 0
+	}
+	return 20 * math.Log10(pct/100)
+}
 
 // Settings adalah pengaturan user yang disimpan ke disk.
 type Settings struct {
 	LimiterEnabled bool    `json:"limiterEnabled"`
 	TargetSPL      float64 `json:"targetSpl"` // batas dengar (dB SPL)
 	Ceiling        float64 `json:"ceiling"`   // gain maksimum 0..1
+	// SpeakerBoost: volume di atas 100% untuk speaker (lewat Equalizer APO).
+	// Tidak pernah berlaku untuk headphone/headset.
+	SpeakerBoost float64 `json:"speakerBoost"`
 	// Calibrations: device ID → maxSPL hasil kalibrasi user.
 	Calibrations map[string]float64 `json:"calibrations"`
 }
@@ -24,6 +38,7 @@ func DefaultSettings() Settings {
 		LimiterEnabled: true,
 		TargetSPL:      70,
 		Ceiling:        1,
+		SpeakerBoost:   MinSpeakerBoost,
 		Calibrations:   map[string]float64{},
 	}
 }
@@ -40,6 +55,10 @@ func (s Settings) Normalize() Settings {
 		s.Ceiling = d.Ceiling
 	}
 	s.Ceiling = clamp(s.Ceiling, MinCeiling, 1)
+	if !isFinite(s.SpeakerBoost) {
+		s.SpeakerBoost = d.SpeakerBoost
+	}
+	s.SpeakerBoost = clamp(s.SpeakerBoost, MinSpeakerBoost, MaxSpeakerBoost)
 
 	cal := make(map[string]float64, len(s.Calibrations))
 	for id, v := range s.Calibrations {

@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"math"
+	"sync"
 	"time"
 
 	wruntime "github.com/wailsapp/wails/v2/pkg/runtime"
@@ -32,6 +34,8 @@ var errNotReady = errors.New("limiter belum siap")
 type App struct {
 	ctx     context.Context
 	wasapi  *adapter.Adapter
+	eqMu    sync.Mutex
+	eqapo   *adapter.EqualizerAPO // nil kalau Equalizer APO tidak terpasang
 	svc     *service.LimiterService
 	store   *store.Store
 	tray    *tray.Tray
@@ -43,6 +47,7 @@ type SettingsView struct {
 	LimiterEnabled bool    `json:"limiterEnabled"`
 	TargetSPL      float64 `json:"targetSpl"`
 	Ceiling        float64 `json:"ceiling"`
+	SpeakerBoost   float64 `json:"speakerBoost"`
 	AutoStart      bool    `json:"autoStart"`
 	DataDir        string  `json:"dataDir"`
 }
@@ -87,6 +92,7 @@ func (a *App) startup(ctx context.Context) {
 
 	a.svc = service.NewLimiterService(limiter, wasapiAdapter, wasapiAdapter, wasapiAdapter,
 		exposureStore, settings, exposure, tickInterval)
+	a.equalizerAPO()
 	if err := a.svc.Start(ctx); err != nil {
 		a.initErr = err
 		return
@@ -176,7 +182,9 @@ func trayTooltip(st service.Status, zone string, avg float64, exp domain.Exposur
 		now = fmt.Sprintf("~%.0f dB · %s", avg, now)
 	}
 	limiter := "Limiter mati"
-	if st.Enabled {
+	if st.Enabled && !st.Active {
+		limiter = "Limiter jeda (bukan headphone)"
+	} else if st.Enabled {
 		limiter = fmt.Sprintf("Limiter aktif (%.0f dB)", st.TargetSPL)
 	}
 	// Tooltip tray Windows maksimal 127 karakter.
@@ -228,6 +236,7 @@ func (a *App) Settings() (SettingsView, error) {
 		LimiterEnabled: st.LimiterEnabled,
 		TargetSPL:      st.TargetSPL,
 		Ceiling:        st.Ceiling,
+		SpeakerBoost:   st.SpeakerBoost,
 		AutoStart:      auto,
 	}
 	if a.store != nil {
@@ -288,4 +297,63 @@ func (a *App) ResetCalibration() error {
 // SetAutoStart mendaftarkan limiterdB untuk jalan otomatis saat login.
 func (a *App) SetAutoStart(on bool) error {
 	return adapter.SetAutoStart(on)
+}
+
+// BoostView menjelaskan status Equalizer APO untuk boost speaker.
+type BoostView struct {
+	Installed bool   `json:"installed"` // Equalizer APO terpasang
+	Linked    bool   `json:"linked"`    // config.txt sudah memuat file boost limiterdB
+	ConfigDir string `json:"configDir"`
+}
+
+// BoostInfo mengecek Equalizer APO. Dicari ulang setiap kali supaya UI ikut
+// berubah setelah user memasangnya tanpa restart limiterdB.
+func (a *App) BoostInfo() (BoostView, error) {
+	if err := a.ready(); err != nil {
+		return BoostView{}, err
+	}
+	eq := a.equalizerAPO()
+	if eq == nil {
+		return BoostView{}, nil
+	}
+	return BoostView{Installed: true, Linked: eq.Linked(), ConfigDir: eq.ConfigDir()}, nil
+}
+
+// LinkEqualizerAPO menghubungkan Equalizer APO. Kalau folder config-nya butuh
+// admin, Windows menampilkan prompt UAC.
+func (a *App) LinkEqualizerAPO() error {
+	if err := a.ready(); err != nil {
+		return err
+	}
+	eq := a.equalizerAPO()
+	if eq == nil {
+		return errors.New("Equalizer APO belum terpasang")
+	}
+	err := eq.Link()
+	if errors.Is(err, fs.ErrPermission) {
+		return adapter.LinkElevated()
+	}
+	return err
+}
+
+// SetSpeakerBoost mengubah boost speaker (100..200%).
+func (a *App) SetSpeakerBoost(pct float64) error {
+	if err := a.ready(); err != nil {
+		return err
+	}
+	a.persist(a.svc.SetSpeakerBoost(pct))
+	return nil
+}
+
+// equalizerAPO mengembalikan instalasi Equalizer APO (dicari kalau belum ketemu).
+func (a *App) equalizerAPO() *adapter.EqualizerAPO {
+	a.eqMu.Lock()
+	defer a.eqMu.Unlock()
+	if a.eqapo == nil {
+		if eq, ok := adapter.FindEqualizerAPO(); ok {
+			a.eqapo = eq
+			a.svc.UseBooster(eq)
+		}
+	}
+	return a.eqapo
 }

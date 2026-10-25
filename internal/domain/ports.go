@@ -27,3 +27,8 @@ type SettingsStore interface {
 	LoadSettings() (Settings, error)
 	SaveSettings(Settings) error
 }
+
+// Booster memasang gain tambahan (dB, ≥ 0) di atas volume 100% Windows.
+type Booster interface {
+	SetBoost(db float64) error
+}

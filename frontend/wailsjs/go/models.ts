@@ -79,10 +79,27 @@ export namespace domain {
 
 export namespace main {
 	
+	export class BoostView {
+	    installed: boolean;
+	    linked: boolean;
+	    configDir: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new BoostView(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.installed = source["installed"];
+	        this.linked = source["linked"];
+	        this.configDir = source["configDir"];
+	    }
+	}
 	export class SettingsView {
 	    limiterEnabled: boolean;
 	    targetSpl: number;
 	    ceiling: number;
+	    speakerBoost: number;
 	    autoStart: boolean;
 	    dataDir: string;
 	
@@ -95,6 +112,7 @@ export namespace main {
 	        this.limiterEnabled = source["limiterEnabled"];
 	        this.targetSpl = source["targetSpl"];
 	        this.ceiling = source["ceiling"];
+	        this.speakerBoost = source["speakerBoost"];
 	        this.autoStart = source["autoStart"];
 	        this.dataDir = source["dataDir"];
 	    }
@@ -106,6 +124,7 @@ export namespace service {
 	
 	export class Status {
 	    enabled: boolean;
+	    active: boolean;
 	    currentVolume: number;
 	    lastLevel: number;
 	    threshold: number;
@@ -117,6 +136,8 @@ export namespace service {
 	    listening: boolean;
 	    deviceOk: boolean;
 	    device: domain.Device;
+	    boostDb: number;
+	    boostError: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new Status(source);
@@ -125,6 +146,7 @@ export namespace service {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.enabled = source["enabled"];
+	        this.active = source["active"];
 	        this.currentVolume = source["currentVolume"];
 	        this.lastLevel = source["lastLevel"];
 	        this.threshold = source["threshold"];
@@ -136,6 +158,8 @@ export namespace service {
 	        this.listening = source["listening"];
 	        this.deviceOk = source["deviceOk"];
 	        this.device = this.convertValues(source["device"], domain.Device);
+	        this.boostDb = source["boostDb"];
+	        this.boostError = source["boostError"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

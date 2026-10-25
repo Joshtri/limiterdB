@@ -17,6 +17,12 @@ import (
 var assets embed.FS
 
 func main() {
+	// Dijalankan ulang sebagai admin oleh tombol "Hubungkan Equalizer APO":
+	// cukup ubah config lalu keluar, tanpa jendela/tray.
+	if slices.Contains(os.Args[1:], adapter.EqAPOLinkFlag) {
+		os.Exit(adapter.RunLinkHelper())
+	}
+
 	// Create an instance of the app structure
 	app := NewApp()
 

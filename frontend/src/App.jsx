@@ -5,6 +5,7 @@ import {
   SetCalibration,
   SetCeiling,
   SetLimiterEnabled,
+  SetSpeakerBoost,
   SetTargetSPL,
   Settings,
   Status,
@@ -16,6 +17,7 @@ import {Button} from '@/components/button'
 import {Tabs} from '@/components/tabs'
 import {SplMeter, VolumeBar} from '@/components/meter'
 import {About} from './About'
+import {BoostCard} from './Boost'
 import {ExposurePanel} from './Exposure'
 import {cn} from '@/lib/cn'
 import {useVisible} from '@/lib/useVisible'
@@ -27,6 +29,7 @@ const POLL_MS = 100
 const AVG_TAU_MS = 2000
 // Selisih kecil di atas batas dengar masih dianggap "di batas".
 const TARGET_TOLERANCE_DB = 1.5
+const HEADPHONE_KINDS = new Set(['headphones', 'headset'])
 
 function useStatus() {
   const visible = useVisible()
@@ -57,6 +60,9 @@ function useStatus() {
 function statusMessage({status, silent, srcSpl, heardSpl}) {
   if (!status?.deviceOk) return 'Tidak ada perangkat output aktif. Colok atau pilih perangkat di Windows.'
   if (status.device.muted) return 'Perangkat sedang di-mute di Windows.'
+  if (status.enabled && !status.active) {
+    return 'Limiter dijeda — perangkat ini bukan headphone/headset. Limiter otomatis aktif lagi saat headphone dipakai.'
+  }
   if (silent) return 'Tidak ada audio yang sedang diputar.'
   const target = Math.round(status.maxSpl + status.threshold)
   const over = heardSpl > target + TARGET_TOLERANCE_DB
@@ -152,20 +158,23 @@ function PresetPicker({targetSpl, onChange}) {
   )
 }
 
-function LimiterPanel({status, avgSrc, avgOut, targetSpl, onTargetChange}) {
+function LimiterPanel({status, avgSrc, avgOut, targetSpl, onTargetChange, speakerBoost, onBoostChange, onError}) {
   const levelDb = status?.lastLevel ?? -100
   const volume = status?.currentVolume ?? 0
   const maxSpl = status?.maxSpl ?? 95
   const ceiling = status?.ceiling ?? 1
-  const enabled = status?.enabled ?? false
+  const enabled = status?.active ?? false
   const listening = status?.listening ?? false
   const reachableSpl = maxSpl + (status?.threshold ?? 0)
+  // Boost speaker (Equalizer APO) menambah gain di atas volume Windows.
+  const boost = status?.boostDb ?? 0
+  const isSpeaker = status?.deviceOk && !HEADPHONE_KINDS.has(status.device.kind)
 
   // dB SPL ≈ kerasnya perangkat + level lagu (dBFS) + gain volume (dB)
-  const heardSpl = maxSpl + levelDb + volumeToDb(volume)
-  const srcSpl = maxSpl + levelDb + volumeToDb(enabled ? ceiling : volume)
-  const avgHeardSpl = maxSpl + (avgOut ?? -100)
-  const avgSrcSpl = maxSpl + (avgSrc ?? -100) + volumeToDb(enabled ? ceiling : volume)
+  const heardSpl = maxSpl + boost + levelDb + volumeToDb(volume)
+  const srcSpl = maxSpl + boost + levelDb + volumeToDb(enabled ? ceiling : volume)
+  const avgHeardSpl = maxSpl + boost + (avgOut ?? -100)
+  const avgSrcSpl = maxSpl + boost + (avgSrc ?? -100) + volumeToDb(enabled ? ceiling : volume)
   const silentAvg = !listening || avgOut == null
   const zone = zoneOfSpl(avgHeardSpl, silentAvg)
 
@@ -179,6 +188,8 @@ function LimiterPanel({status, avgSrc, avgOut, targetSpl, onTargetChange}) {
         showSpl={!silentAvg}
         message={statusMessage({status, silent: silentAvg, srcSpl: avgSrcSpl, heardSpl: avgHeardSpl})}
       />
+
+      {isSpeaker && <BoostCard speakerBoost={speakerBoost} onBoostChange={onBoostChange} status={status} onError={onError} />}
 
       <div className="flex flex-col gap-4 rounded-md border border-(--color-border) bg-(--color-surface-2) p-4">
         <SplMeter label="Tanpa limiter" hint="kerasnya lagu ini" spl={srcSpl} silent={!listening} targetSpl={reachableSpl} />
@@ -243,6 +254,7 @@ function SettingsPanel({status, avgOut, settings, ceiling, onCeilingChange, onAu
   const device = status?.deviceOk ? status.device : null
   const maxSpl = maxSplDraft ?? status?.maxSpl ?? 95
   const silent = !status?.listening
+  const boost = status?.boostDb ?? 0
   const measuredNum = Number(measured.replace(',', '.'))
   const canCalibrate = device && !silent && Number.isFinite(measuredNum) && measuredNum >= 30 && measuredNum <= 130
 
@@ -255,7 +267,7 @@ function SettingsPanel({status, avgOut, settings, ceiling, onCeilingChange, onAu
 
   function calibrate() {
     // measured = maxSpl + avgOut  →  maxSpl = measured − avgOut
-    saveMaxSpl(Math.round((measuredNum - avgOut) * 2) / 2)
+    saveMaxSpl(Math.round((measuredNum - avgOut - boost) * 2) / 2)
     setMeasured('')
   }
 
@@ -296,7 +308,7 @@ function SettingsPanel({status, avgOut, settings, ceiling, onCeilingChange, onAu
           <span className="text-[11px] text-(--color-muted)">
             Putar lagu, taruh mikrofon HP di posisi telinga (untuk headphone: tempelkan ke bantalan telinga), baca angka
             rata-ratanya, lalu masukkan di sini. Perkiraan saat ini:{' '}
-            <span className="text-(--color-fg)">{silent ? '—' : `~${Math.round(maxSpl + avgOut)} dB`}</span>
+            <span className="text-(--color-fg)">{silent ? '—' : `~${Math.round(maxSpl + boost + avgOut)} dB`}</span>
           </span>
           <div className="flex gap-2">
             <input
@@ -343,6 +355,7 @@ function App() {
   const [settings, setSettings] = useState(null)
   const [targetSpl, setTargetSpl] = useState(70)
   const [ceiling, setCeiling] = useState(1)
+  const [speakerBoost, setSpeakerBoost] = useState(100)
   const [error, setError] = useState('')
   const migrated = useRef(false)
 
@@ -354,6 +367,7 @@ function App() {
         setSettings(s)
         setTargetSpl(Math.round(s.targetSpl))
         setCeiling(s.ceiling)
+        setSpeakerBoost(s.speakerBoost)
       })
       .catch((e) => setError(String(e)))
   }, [])
@@ -381,6 +395,11 @@ function App() {
   function onCeilingChange(v) {
     setCeiling(v)
     SetCeiling(v).catch((e) => setError(String(e)))
+  }
+
+  function onBoostChange(pct) {
+    setSpeakerBoost(pct)
+    SetSpeakerBoost(pct).catch((e) => setError(String(e)))
   }
 
   function onAutoStartChange(on) {
@@ -412,7 +431,16 @@ function App() {
       <main className="min-h-0 flex-1 overflow-y-auto bg-(--color-surface) [scrollbar-gutter:stable]">
         <div className="mx-auto w-full max-w-2xl p-5">
           <Tabs.Panel value="limiter">
-            <LimiterPanel status={status} avgSrc={avgSrc} avgOut={avgOut} targetSpl={targetSpl} onTargetChange={onTargetChange} />
+            <LimiterPanel
+              status={status}
+              avgSrc={avgSrc}
+              avgOut={avgOut}
+              targetSpl={targetSpl}
+              onTargetChange={onTargetChange}
+              speakerBoost={speakerBoost}
+              onBoostChange={onBoostChange}
+              onError={setError}
+            />
           </Tabs.Panel>
 
           <Tabs.Panel value="exposure">{tab === 'exposure' && <ExposurePanel targetSpl={targetSpl} />}</Tabs.Panel>
